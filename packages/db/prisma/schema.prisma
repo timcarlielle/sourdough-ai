@@ -1,0 +1,699 @@
+// Sourdough Monitoring Engine v2 - Postgres-first schema
+// https://prisma.io/docs/concepts/components/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// 7.1 Core
+// ---------------------------------------------------------------------------
+
+model User {
+  id                 String   @id @default(uuid())
+  email              String   @unique
+  passwordHash       String   @map("password_hash")
+  timezone           String   @default("America/Edmonton") @map("timezone") // IANA e.g. America/Edmonton, Europe/London
+  trackedBakePhases  Json?    @map("tracked_bake_phases") // array of BakeEventPhase strings; null = track all
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  devices               Device[]
+  telemetryReadings     TelemetryReading[]
+  starterFeedings       StarterFeeding[]
+  starterCycles         StarterCycle[]
+  starterCycleAnalyses  StarterCycleAnalysis[]
+  starterModels         StarterModel[]
+  starterPredictions    StarterPrediction[]
+  recipes               Recipe[]
+  bakes                 Bake[]
+  bakeEvents            BakeEvent[]
+  customBakeEventTypes  CustomBakeEventType[]
+  voiceClips            VoiceClip[]
+  voiceLogs             VoiceLog[]
+  voiceTokens           VoiceToken[]
+  apiTokens             ApiToken[]
+  notes                 Note[]
+  dashboardInsightCache  DashboardInsightCache?
+  starterCurveParams    StarterCurveParams?
+
+  @@map("users")
+}
+
+model CustomBakeEventType {
+  id        String         @id @default(uuid())
+  userId    String         @map("user_id")
+  eventType String         @map("event_type") // slug e.g. steam_added, custom_steam
+  label     String         // display name e.g. "Steam"
+  phase     BakeEventPhase @map("phase")
+  sortOrder Int            @default(0) @map("sort_order")
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventType])
+  @@index([userId])
+  @@map("custom_bake_event_types")
+}
+
+model DashboardInsightCache {
+  id        String   @id @default(uuid())
+  userId    String   @unique @map("user_id")
+  insights  Json     // array of strings (Jarvis-style messages)
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("dashboard_insight_cache")
+}
+
+model Device {
+  id                 String     @id @default(uuid())
+  userId             String     @map("user_id")
+  name               String
+  deviceType         DeviceType @map("device_type")
+  tokenHash          String     @map("token_hash")
+  isActive           Boolean    @default(true) @map("is_active")
+  baselineDistanceMm Float?     @map("baseline_distance_mm")
+  createdAt          DateTime   @default(now()) @map("created_at")
+  lastSeenAt         DateTime?  @map("last_seen_at")
+
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  telemetryReadings TelemetryReading[]
+  starterFeedings   StarterFeeding[]
+  starterCycles     StarterCycle[]
+  bakes            Bake[]            @relation("BakeDoughDevice")
+  deviceTokens     DeviceToken[]
+
+  @@index([userId])
+  @@map("devices")
+}
+
+enum DeviceType {
+  starter_monitor
+  dough_monitor
+}
+
+model DeviceToken {
+  id        String    @id @default(uuid())
+  deviceId  String    @map("device_id")
+  tokenHash String    @map("token_hash")
+  createdAt DateTime  @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId])
+  @@map("device_tokens")
+}
+
+// ---------------------------------------------------------------------------
+// 7.2 Telemetry (time-series)
+// ---------------------------------------------------------------------------
+
+model TelemetryReading {
+  id                 String           @id @default(uuid())
+  userId             String           @map("user_id")
+  deviceId           String           @map("device_id")
+  readingType        ReadingType      @map("reading_type")
+  recordedAt         DateTime         @map("recorded_at")
+  payload            Json?
+  distanceMm         Float?           @map("distance_mm")
+  ambientTempC       Float?           @map("ambient_temp_c")
+  ambientHumidityPct Float?           @map("ambient_humidity_pct")
+  doughTempC         Float?           @map("dough_temp_c")
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, recordedAt(sort: Desc)])
+  @@index([userId, recordedAt(sort: Desc)])
+  @@map("telemetry_readings")
+}
+
+enum ReadingType {
+  starter
+  dough
+}
+
+// ---------------------------------------------------------------------------
+// 7.3 Starter cycles + feedings
+// ---------------------------------------------------------------------------
+
+model StarterFeeding {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  deviceId      String?   @map("device_id")
+  fedAt         DateTime  @map("fed_at")
+  starterAmountG Float    @map("starter_amount_g")
+  flourAmountG  Float     @map("flour_amount_g")
+  flourNotes    String?   @map("flour_notes")
+  waterAmountG  Float     @map("water_amount_g")
+  waterTempC    Float?    @map("water_temp_c")
+  saltG         Float?       @map("salt_g")
+  notes         String?
+  source        FeedingSource @default(manual) @map("source")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device       Device?       @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  starterCycles StarterCycle[]
+
+  @@index([userId, fedAt(sort: Desc)])
+  @@map("starter_feedings")
+}
+
+enum FeedingSource {
+  manual
+  siri
+}
+
+enum StarterCycleStatus {
+  ACTIVE
+  COMPLETED
+  INVALID
+}
+
+enum StarterCycleSource {
+  FEEDING
+  INFERRED
+}
+
+model StarterCycle {
+  id              String    @id @default(uuid())
+  userId          String    @map("user_id")
+  deviceId        String?   @map("device_id")
+  startedAt       DateTime  @map("started_at")
+  sourceFeedingId String?   @map("source_feeding_id")
+  endedAt         DateTime? @map("ended_at")
+  status          StarterCycleStatus @default(ACTIVE) @map("status")
+  source          StarterCycleSource @default(FEEDING) @map("source")
+  notes           String?
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  device        Device?       @relation(fields: [deviceId], references: [id], onDelete: SetNull)
+  sourceFeeding StarterFeeding? @relation(fields: [sourceFeedingId], references: [id], onDelete: SetNull)
+  bakes         Bake[]
+  analyses      StarterCycleAnalysis[]
+  predictions   StarterPrediction[]
+
+  @@index([userId, startedAt(sort: Desc)])
+  @@index([userId, status])
+  @@map("starter_cycles")
+}
+
+model StarterCycleAnalysis {
+  id                String   @id @default(uuid())
+  userId            String   @map("user_id")
+  cycleId           String   @unique @map("cycle_id")
+  isValid           Boolean  @map("is_valid")
+  invalidReason     String?  @map("invalid_reason")
+  trimStartMinutes  Int      @map("trim_start_minutes")
+  trimEndMinutes    Int      @map("trim_end_minutes")
+  sampleCountRaw    Int      @map("sample_count_raw")
+  sampleCountUsed   Int      @map("sample_count_used")
+  outlierCount      Int      @map("outlier_count")
+  baselineDistanceMm Float   @map("baseline_distance_mm")
+  avgAmbientTempC   Float?   @map("avg_ambient_temp_c")
+  avgHumidityPct    Float?   @map("avg_humidity_pct")
+  fitQuality        Float    @map("fit_quality")
+  amplitudeMm       Float    @map("amplitude_mm")
+  muMinutes         Float    @map("mu_minutes")
+  sigmaMinutes      Float    @map("sigma_minutes")
+  timeToPeakMinutes Float    @map("time_to_peak_minutes")
+  riseRate          Float?   @map("rise_rate")
+  decayRate         Float?   @map("decay_rate")
+  auc               Float?   @map("auc")
+  debugSeries       Json     @map("debug_series") // { rawSeries, cleanedSeries, smoothedSeries, fittedSeries }
+  meta              Json?    @map("meta")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cycle StarterCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([cycleId])
+  @@map("starter_cycle_analyses")
+}
+
+enum StarterModelType {
+  TEMP_ONLY
+  TEMP_PLUS_HYDRATION
+}
+
+model StarterModel {
+  id                 String   @id @default(uuid())
+  userId             String   @map("user_id")
+  name               String   @map("name")
+  isActive           Boolean  @default(false) @map("is_active")
+  isLocked           Boolean  @default(false) @map("is_locked")
+  modelType          StarterModelType @default(TEMP_ONLY) @map("model_type")
+  paramA             Float?   @map("param_a")
+  paramK             Float?   @map("param_k")
+  paramB             Float?   @map("param_b")
+  sigmaBaseMinutes   Float?   @map("sigma_base_minutes")
+  hydrationCoeff     Float?   @map("hydration_coeff")
+  trainedOnCycles    Int      @default(0) @map("trained_on_cycles")
+  lastTrainedAt      DateTime? @map("last_trained_at")
+  meta               Json?    @map("meta")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  predictions StarterPrediction[]
+
+  @@index([userId])
+  @@map("starter_models")
+}
+
+model StarterPrediction {
+  id                   String    @id @default(uuid())
+  userId               String    @map("user_id")
+  cycleId              String    @map("cycle_id")
+  modelId              String    @map("model_id")
+  predictedAt          DateTime  @map("predicted_at")
+  predictedPeakAt      DateTime  @map("predicted_peak_at")
+  predictedPeakStartAt DateTime  @map("predicted_peak_start_at")
+  predictedPeakEndAt   DateTime  @map("predicted_peak_end_at")
+  confidence           Float     @map("confidence") // 0-1
+  predictedSeries      Json?     @map("predicted_series") // [{ tMin, heightMm }]
+  errorMinutes         Float?    @map("error_minutes")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  user  User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cycle StarterCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  model StarterModel @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@unique([cycleId, modelId])
+  @@index([userId])
+  @@index([cycleId])
+  @@index([modelId])
+  @@map("starter_predictions")
+}
+
+// Per-user params for predicted starter activity curve (peak time, curve shape).
+// Deprecated in favor of StarterModel; kept for backward compatibility during migration.
+model StarterCurveParams {
+  id                 String   @id @default(uuid())
+  userId             String   @unique @map("user_id")
+  peakHoursAfterFeed Float    @default(4) @map("peak_hours_after_feed")
+  windowHours        Float    @default(24) @map("window_hours")
+  sigma              Float    @default(2.5)
+  intervalMinutes    Int      @default(15) @map("interval_minutes")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("starter_curve_params")
+}
+
+// ---------------------------------------------------------------------------
+// 7.4 Recipes
+// ---------------------------------------------------------------------------
+
+model Recipe {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  title       String
+  description String?
+  url            String?   // optional source link; worker can scrape to fill ingredients/steps/notes
+  scrapePending  Boolean   @default(false) @map("scrape_pending") // true while worker is extracting from url
+  isDefault      Boolean   @default(false) @map("is_default")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  user                User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ingredients         RecipeIngredient[]
+  steps               RecipeStep[]
+  recipeNotes         RecipeNote[]
+  bakes               Bake[]
+  recipeAdjustmentSets RecipeAdjustmentSet[]
+
+  @@index([userId])
+  @@map("recipes")
+}
+
+model RecipeIngredient {
+  id         String  @id @default(uuid())
+  recipeId   String  @map("recipe_id")
+  name       String
+  amountG    Float?  @map("amount_g")
+  bakerPct   Float?  @map("baker_pct")
+  notes      String?
+  sortOrder  Int     @map("sort_order")
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+  @@map("recipe_ingredients")
+}
+
+model RecipeStep {
+  id                      String  @id @default(uuid())
+  recipeId                String  @map("recipe_id")
+  section                 String
+  stepText                String  @map("step_text")
+  sortOrder               Int     @map("sort_order")
+  estimatedMinutesFromStart Int?   @map("estimated_minutes_from_start")
+  eventType               String? @map("event_type")
+  eventPhase              String? @map("event_phase")
+  targetState             String? @map("target_state") // fermentation intent: starter_peak, dough_50pct, proof_ready, etc.
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+  @@map("recipe_steps")
+}
+
+model RecipeNote {
+  id        String @id @default(uuid())
+  recipeId  String @map("recipe_id")
+  category  String
+  noteText  String @map("note_text")
+  sortOrder Int    @map("sort_order")
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+  @@map("recipe_notes")
+}
+
+// ---------------------------------------------------------------------------
+// 7.5 Bakes
+// ---------------------------------------------------------------------------
+
+model Bake {
+  id                 String    @id @default(uuid())
+  userId             String    @map("user_id")
+  recipeId           String    @map("recipe_id")
+  starterCycleId     String?   @map("starter_cycle_id")
+  doughDeviceId      String?   @map("dough_device_id")
+  startedAt          DateTime  @map("started_at")
+  endedAt            DateTime? @map("ended_at")
+  doughBatchName     String?   @map("dough_batch_name")
+  notes              String?
+  starterPlanSteps   Json?     @map("starter_plan_steps") // PlanStep[]: FEED, FRIDGE_IN, FRIDGE_OUT, PEAK_WINDOW, MIX (UTC)
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipe        Recipe         @relation(fields: [recipeId], references: [id], onDelete: Restrict)
+  starterCycle  StarterCycle?  @relation(fields: [starterCycleId], references: [id], onDelete: SetNull)
+  doughDevice         Device?               @relation("BakeDoughDevice", fields: [doughDeviceId], references: [id], onDelete: SetNull)
+  milestones          BakeMilestone[]
+  events              BakeEvent[]
+  outcomes            BakeOutcome[]
+  recipeAdjustmentSets RecipeAdjustmentSet[]
+  voiceLogs           VoiceLog[]
+  linkedNotes         Note[]
+
+  @@index([userId, startedAt(sort: Desc)])
+  @@map("bakes")
+}
+
+model BakeMilestone {
+  id           String         @id @default(uuid())
+  bakeId       String         @map("bake_id")
+  milestoneType MilestoneType @map("milestone_type")
+  occurredAt   DateTime      @map("occurred_at")
+  meta         Json?
+  notes        String?
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  bake Bake @relation(fields: [bakeId], references: [id], onDelete: Cascade)
+
+  @@index([bakeId])
+  @@map("bake_milestones")
+}
+
+enum MilestoneType {
+  mix
+  autolyse_start
+  salt_added
+  fold
+  shape
+  proof_start
+  fridge
+  bake_in
+  bake_out
+  score
+  steam_on
+  steam_off
+  other
+}
+
+// First-class bake events (process timeline)
+model BakeEvent {
+  id            String         @id @default(uuid())
+  bakeId        String?        @map("bake_id")
+  userId        String         @map("user_id")
+  eventType     String         @map("event_type")
+  occurredAt    DateTime       @map("occurred_at")
+  eventPhase    BakeEventPhase @map("event_phase")
+  sequenceIndex Int?           @map("sequence_index")
+  metadata      Json?          @map("metadata")
+  notes         String?
+  source        BakeEventSource @default(manual) @map("source")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  bake Bake? @relation(fields: [bakeId], references: [id], onDelete: Cascade)
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([bakeId, occurredAt(sort: Asc)])
+  @@index([userId])
+  @@map("bake_events")
+}
+
+enum BakeEventSource {
+  manual
+  siri
+  sensor
+  recipe
+  engine
+}
+
+enum BakeEventPhase {
+  mixing
+  bulk_fermentation
+  dividing
+  shaping
+  proofing
+  baking
+  cooling
+  evaluation
+  environment
+  custom
+}
+
+model BakeOutcome {
+  id                    String   @id @default(uuid())
+  bakeId                String   @map("bake_id")
+  // Ratings 1–5 (fast logging)
+  crumbOpennessRating   Int?     @map("crumb_openness_rating")
+  crumbTextureRating    Int?     @map("crumb_texture_rating")
+  crustColorRating      Int?     @map("crust_color_rating")
+  crustThicknessRating  Int?     @map("crust_thickness_rating")
+  ovenSpringRating      Int?     @map("oven_spring_rating")
+  sournessRating        Int?     @map("sourness_rating")
+  appearanceRating      Int?     @map("appearance_rating")
+  overallRating         Int?     @map("overall_rating")
+  // Quick toggles
+  tooSour                Boolean  @default(false) @map("too_sour")
+  underproofed          Boolean  @default(false) @map("underproofed")
+  overproofed           Boolean  @default(false) @map("overproofed")
+  dense                 Boolean  @default(false) @map("dense")
+  gummy                 Boolean  @default(false) @map("gummy")
+  // Legacy / optional
+  gumminessRating       Int?     @map("gumminess_rating")
+  freeformNotes         String?  @map("freeform_notes")
+  photoUrls             Json?    @map("photo_urls")
+  createdAt             DateTime @default(now()) @map("created_at")
+
+  bake Bake @relation(fields: [bakeId], references: [id], onDelete: Cascade)
+
+  @@index([bakeId])
+  @@map("bake_outcomes")
+}
+
+// ---------------------------------------------------------------------------
+// Analytics engine: recipe adjustment suggestions (rule-driven)
+// ---------------------------------------------------------------------------
+
+model RecipeAdjustmentSet {
+  id                String   @id @default(uuid())
+  recipeId          String   @map("recipe_id")
+  bakeId            String   @map("bake_id")
+  suggestions       Json     // object: { suggestions: [], rulesTriggered, starterMetrics, doughMetrics } or legacy array
+  suggestionFeedback Json?   @map("suggestion_feedback") // { "0": "accepted" | "ignored", ... }
+  confidenceScore   Float?   @map("confidence_score")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  recipe Recipe @relation(fields: [recipeId], references: [id], onDelete: Cascade)
+  bake   Bake   @relation(fields: [bakeId], references: [id], onDelete: Cascade)
+
+  @@index([recipeId])
+  @@index([bakeId])
+  @@map("recipe_adjustment_sets")
+}
+
+// ---------------------------------------------------------------------------
+// 7.6 Voice logging
+// ---------------------------------------------------------------------------
+
+model VoiceClip {
+  id               String        @id @default(uuid())
+  userId           String        @map("user_id")
+  createdAt        DateTime      @default(now()) @map("created_at")
+  audioUrl         String?       @map("audio_url")
+  transcriptionText String?      @map("transcription_text")
+  parsedJson       Json?         @map("parsed_json")
+  status           VoiceClipStatus @default(uploaded)
+  errorMessage     String?       @map("error_message")
+
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  voiceEventsCreated VoiceEventCreated[]
+
+  @@index([userId])
+  @@map("voice_clips")
+}
+
+enum VoiceClipStatus {
+  uploaded
+  transcribed
+  parsed
+  failed
+}
+
+model VoiceEventCreated {
+  id          String   @id @default(uuid())
+  voiceClipId String   @map("voice_clip_id")
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  voiceClip VoiceClip @relation(fields: [voiceClipId], references: [id], onDelete: Cascade)
+
+  @@index([voiceClipId])
+  @@map("voice_events_created")
+}
+
+// Siri / voice text logging (POST /ingest/voice)
+model VoiceLog {
+  id               String       @id @default(uuid())
+  userId           String       @map("user_id")
+  source           String       @default("siri") @map("source")
+  recordedAt       DateTime     @map("recorded_at")
+  receivedAt       DateTime     @map("received_at")
+  text             String       @map("text")
+  rawMeta          Json?        @map("raw_meta")
+  status           VoiceLogStatus @default(pending) @map("status")
+  error            String?      @map("error")
+  llmModel         String?      @map("llm_model")
+  llmPromptVersion String?      @map("llm_prompt_version")
+  llmRequest       Json?        @map("llm_request")
+  llmResponse      Json?        @map("llm_response")
+  appliedActions   Json?        @map("applied_actions")
+  bakeId           String?      @map("bake_id")
+  responseText     String?      @map("response_text")
+  intentType       String?      @map("intent_type")
+  processedAt      DateTime?    @map("processed_at")
+  createdAt        DateTime     @default(now()) @map("created_at")
+  updatedAt        DateTime     @updatedAt @map("updated_at")
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bake Bake? @relation(fields: [bakeId], references: [id], onDelete: SetNull)
+  actions VoiceLogAction[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([bakeId])
+  @@map("voice_logs")
+}
+
+enum VoiceLogStatus {
+  pending
+  applied
+  error
+}
+
+// Idempotency: which action indices were already applied for this VoiceLog
+model VoiceLogAction {
+  id          String   @id @default(uuid())
+  voiceLogId  String   @map("voice_log_id")
+  actionIndex Int      @map("action_index")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  voiceLog VoiceLog @relation(fields: [voiceLogId], references: [id], onDelete: Cascade)
+
+  @@unique([voiceLogId, actionIndex])
+  @@index([voiceLogId])
+  @@map("voice_log_actions")
+}
+
+// Siri / voice bearer token (revocable, separate from device tokens)
+model VoiceToken {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  tokenHash  String    @map("token_hash")
+  name       String    @map("name")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@map("voice_tokens")
+}
+
+// Personal access token for API clients (mobile app, scripts). Raw token shown once;
+// only the SHA-256 hash is stored. Auth: Authorization: Bearer <token> on any API route.
+model ApiToken {
+  id         String    @id @default(uuid())
+  userId     String    @map("user_id")
+  tokenHash  String    @unique @map("token_hash")
+  name       String    @map("name")
+  lastUsedAt DateTime? @map("last_used_at")
+  revokedAt  DateTime? @map("revoked_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("api_tokens")
+}
+
+// Freeform note (voice or manual), optionally linked to a bake
+model Note {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  bakeId    String?  @map("bake_id")
+  text      String   @map("text")
+  source    NoteSource @default(manual) @map("source")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bake Bake? @relation(fields: [bakeId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([bakeId])
+  @@map("notes")
+}
+
+enum NoteSource {
+  manual
+  siri
+}

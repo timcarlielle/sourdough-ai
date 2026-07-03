@@ -1,0 +1,77 @@
+# Split stack — app host: web UI + worker + migrations.
+# Postgres, Redis, and the ingest API run on a separate "hub" host
+# (see docker-compose.pi.yml). See docs/Split-Stack.md for the full setup.
+#
+# Required in .env (replace <HUB_IP> with your hub host's LAN IP):
+#   DATABASE_URL=postgresql://sourdough:<password>@<HUB_IP>:5432/sourdough
+#   REDIS_URL=redis://<HUB_IP>:6379
+#   NEXTAUTH_URL=http://<THIS_HOST_IP>:3000   (or http://localhost:3000 if only local)
+#   NEXTAUTH_SECRET=<openssl rand -base64 32>
+#
+#   docker compose -f docker-compose.mac.yml up -d --build
+
+services:
+  # One-shot: applies Prisma migrations + idempotent seed against the hub DB, then exits.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sourdough-worker
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env (postgres on the hub host)}
+    command: sh -c "npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma && npm run seed --workspace=db"
+    restart: "no"
+
+  web-app:
+    build:
+      context: .
+      dockerfile: apps/web-app/Dockerfile
+    image: sourdough-web
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env (redis on the hub host)}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      UPLOAD_DIR: /app/uploads
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+    volumes:
+      - uploads_data:/app/uploads
+    ports:
+      - "${WEB_PORT_HOST:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/meta >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sourdough-worker
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL in .env}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL in .env}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      UPLOAD_DIR: /app/uploads
+      INTERNAL_WEB_URL: http://web-app:3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL_TRANSCRIBE: ${OPENAI_MODEL_TRANSCRIBE:-gpt-4o-mini-transcribe}
+      OPENAI_MODEL_PARSE: ${OPENAI_MODEL_PARSE:-gpt-4o-mini}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+    volumes:
+      - uploads_data:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  uploads_data: {}

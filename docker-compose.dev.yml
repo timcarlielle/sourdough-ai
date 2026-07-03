@@ -1,0 +1,130 @@
+# Local development stack (source mounted, dev servers with hot reload)
+# Usage: docker compose -f docker-compose.dev.yml up --build
+# Stop:  docker compose -f docker-compose.dev.yml down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sourdough}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sourdough}
+      POSTGRES_DB: ${POSTGRES_DB:-sourdough}
+    ports:
+      - "${POSTGRES_PORT_HOST:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sourdough} -d ${POSTGRES_DB:-sourdough}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT_HOST:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Runs migrations + seed once at startup, then exits.
+  # Install OpenSSL so Prisma's schema engine can run (bookworm-slim doesn't include it by default).
+  migrate:
+    image: node:20-bookworm-slim
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+    volumes:
+      - ./:/app
+      - migrate_node_modules:/app/node_modules
+    command: >
+      sh -c "
+        apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates &&
+        npm ci &&
+        npm run db:generate &&
+        npm run db:migrate &&
+        npm run db:seed
+      "
+    restart: "no"
+
+  web-app:
+    image: node:20-bookworm-slim
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+      REDIS_URL: redis://redis:6379
+      UPLOAD_DIR: /app/uploads
+    volumes:
+      - ./:/app
+      - web_node_modules:/app/node_modules
+      - uploads_data:/app/uploads
+    command: sh -c "apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && npm ci && npx prisma generate --schema=packages/db/prisma/schema.prisma && npm run dev:web"
+    ports:
+      - "${WEB_PORT_HOST:-3000}:3000"
+
+  ingest-api:
+    image: node:20-bookworm-slim
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+    volumes:
+      - ./:/app
+      - ingest_node_modules:/app/node_modules
+    command: sh -c "apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && npm ci && npx prisma generate --schema=packages/db/prisma/schema.prisma && npm run dev:ingest"
+    ports:
+      - "${INGEST_PORT_HOST:-3001}:3001"
+
+  worker:
+    image: node:20-bookworm-slim
+    working_dir: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+      REDIS_URL: redis://redis:6379
+      UPLOAD_DIR: /app/uploads
+      INTERNAL_WEB_URL: http://web-app:3000
+    volumes:
+      - ./:/app
+      - worker_node_modules:/app/node_modules
+      - uploads_data:/app/uploads
+    command: sh -c "apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && npm ci && npx prisma generate --schema=packages/db/prisma/schema.prisma && npm run dev:worker"
+    restart: unless-stopped
+
+volumes:
+  postgres_data: {}
+  migrate_node_modules: {}
+  web_node_modules: {}
+  ingest_node_modules: {}
+  worker_node_modules: {}
+  uploads_data: {}

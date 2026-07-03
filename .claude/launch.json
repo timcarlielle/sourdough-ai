@@ -1,0 +1,21 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "web-dev",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "DATABASE_URL=postgresql://sourdough:sourdough@localhost:5433/sourdough",
+        "REDIS_URL=redis://localhost:6379",
+        "NEXTAUTH_URL=http://localhost:3100",
+        "npx",
+        "next",
+        "dev",
+        "-p",
+        "3100"
+      ],
+      "cwd": "apps/web-app",
+      "port": 3100
+    }
+  ]
+}

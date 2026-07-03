@@ -1,0 +1,139 @@
+# Sourdough AI — production self-hosting stack
+#
+#   cp .env.example .env   # then set NEXTAUTH_SECRET (openssl rand -base64 32)
+#   docker compose up -d --build
+#
+# Web UI on :3000, sensor ingest API on :3001. Postgres/Redis are not exposed
+# to the host by default. Reset everything with: docker compose down -v
+#
+# For local development with hot reload, use docker-compose.dev.yml instead.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sourdough}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sourdough}
+      POSTGRES_DB: ${POSTGRES_DB:-sourdough}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sourdough} -d ${POSTGRES_DB:-sourdough}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # One-shot: applies Prisma migrations (and seed, which is idempotent) then exits.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sourdough-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+    command: sh -c "npx prisma migrate deploy --schema=packages/db/prisma/schema.prisma && npm run seed --workspace=db"
+    restart: "no"
+
+  web-app:
+    build:
+      context: .
+      dockerfile: apps/web-app/Dockerfile
+    image: sourdough-web
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+      REDIS_URL: redis://redis:6379
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?set NEXTAUTH_SECRET in .env}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      UPLOAD_DIR: /app/uploads
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+    volumes:
+      - uploads_data:/app/uploads
+    ports:
+      - "${WEB_PORT_HOST:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/meta >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  ingest-api:
+    build:
+      context: .
+      dockerfile: apps/ingest-api/Dockerfile
+    image: sourdough-ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "${INGEST_PORT_HOST:-3001}:3001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: sourdough-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-sourdough}:${POSTGRES_PASSWORD:-sourdough}@postgres:5432/${POSTGRES_DB:-sourdough}
+      REDIS_URL: redis://redis:6379
+      APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+      UPLOAD_DIR: /app/uploads
+      INTERNAL_WEB_URL: http://web-app:3000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL_TRANSCRIBE: ${OPENAI_MODEL_TRANSCRIBE:-gpt-4o-mini-transcribe}
+      OPENAI_MODEL_PARSE: ${OPENAI_MODEL_PARSE:-gpt-4o-mini}
+      INTERNAL_API_SECRET: ${INTERNAL_API_SECRET:-}
+    volumes:
+      - uploads_data:/app/uploads
+    restart: unless-stopped
+
+volumes:
+  postgres_data: {}
+  redis_data: {}
+  uploads_data: {}

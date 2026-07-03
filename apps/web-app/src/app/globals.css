@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-crust: 250 250 249;
+  --color-ink: 28 25 23;
+  --color-accent: 120 53 15;
+  --color-muted: 120 113 108;
+}
+
+body {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+a:hover {
+  text-decoration: underline;
+}
